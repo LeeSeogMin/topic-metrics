@@ -1,4 +1,4 @@
-# 2차 통합본
+# 엉망 통합본
 import pandas as pd
 import numpy as np
 import torch
