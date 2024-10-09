@@ -48,6 +48,8 @@ from sklearn.decomposition import PCA
 from sklearn.metrics.pairwise import cosine_distances, euclidean_distances
 from scipy.spatial.distance import cityblock, jensenshannon
 from collections import Counter
+import logging
+from tqdm import tqdm
 
 # 공통 시각화 및 분석 모듈 import
 from common_visualization import visualize_metrics, analyze_correlations
@@ -523,8 +525,8 @@ def verify_llm_consistency(topics, documents, n_repeats=5):
     avg_std = np.mean(std_scores)
     cv_scores = std_scores / np.mean(all_scores, axis=0)
     avg_cv = np.mean(cv_scores)
-    print(f"\nLLM 평가의 ���균 표준편차: {avg_std:.4f}")
-    print(f"LLM 평가의 평균 변동계수(CV): {avg_cv:.4f}")
+    print(f"\nLLM 평가의 평균 표준편차: {avg_std:.4f}")
+    print(f"LLM 평가의 평균 변동계수(CV): {avg_cv:.4f}")  
 
 def summarize_results(metrics_df, llm_df):
     print("\n=== 결과 요약 ===")
@@ -596,6 +598,52 @@ def analyze_llm_feedback(llm_df):
     for keyword in relationship_keywords:
         print(f"{keyword}: {word_freq[keyword]}")
 
+def run_llm_evaluation(metrics_df, datasets, sample_size=100, chunk_size=10):
+    llm_results = []
+    actual_sample_size = min(sample_size, len(metrics_df))
+    
+    for index, row in tqdm(metrics_df.sample(n=actual_sample_size, random_state=42).iterrows(), total=actual_sample_size):
+        domain = row['Domain']
+        dataset_name = row['Dataset']
+        model_type = row['Model']
+        num_topics = row['Num_Topics']
+        
+        logging.info(f"LLM 평가 진행 중 - 도메인: {domain}, 데이터셋: {dataset_name}, 모델: {model_type}, 토픽 수: {num_topics}")
+
+        try:
+            data = datasets[domain][dataset_name]
+            model, _, topics = perform_topic_modeling(data, num_topics, model_type)
+            scores, feedbacks = llm_evaluation(topics, data)
+
+            result = {
+                'Domain': domain,
+                'Dataset': dataset_name,
+                'Model': model_type,
+                'Num_Topics': num_topics,
+                'LLM_Scores': scores,
+                'LLM_Feedbacks': feedbacks
+            }
+            llm_results.append(result)
+
+            if len(llm_results) % chunk_size == 0:
+                save_results_chunk(llm_results[-chunk_size:])
+                
+        except Exception as e:
+            logging.error(f"Error processing {domain} - {dataset_name} - {model_type} - {num_topics}: {str(e)}")
+            continue
+
+    if len(llm_results) % chunk_size != 0:
+        save_results_chunk(llm_results[-(len(llm_results) % chunk_size):])
+
+    llm_df = pd.DataFrame(llm_results)
+    return llm_df
+
+def save_results_chunk(results_chunk):
+    with open('llm_evaluation_results.json', 'a') as f:
+        for result in results_chunk:
+            json.dump(result, f)
+            f.write('\n')
+
 # 메인 실행 코드
 if __name__ == '__main__':
     # 평가 지표 결과 저장을 위한 데이터프레임 초기화
@@ -655,7 +703,7 @@ if __name__ == '__main__':
     analyze_correlations(metrics_df, ['Distinctiveness', 'JSD', 'Hellinger'])
 
     # LLM 평가 실행 (선택적)
-    llm_df = llm_evaluation(metrics_df, datasets)
+    llm_df = run_llm_evaluation(metrics_df, datasets)
 
     # LLM 평가 결과 분석
     analyze_llm_results(llm_df)

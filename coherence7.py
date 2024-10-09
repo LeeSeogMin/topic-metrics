@@ -578,18 +578,20 @@ Reason: [explanation]
     try:
         evaluation = call_openai_api(prompt)
 
+        # Updated parsing logic to extract structured responses
         topic_evaluations = re.findall(r"Topic \d+:.*?(?=Topic \d+:|$)", evaluation, re.DOTALL)
         for eval in topic_evaluations:
-            score_match = re.search(r'Topic \d+:\s*(\d+)', eval)
-            if score_match:
-                topic_score = int(score_match.group(1))
+            score_match = re.search(r'Topic (\d+):\s*(\d+)', eval)
+            reason_match = re.search(r'Reason:\s*(.*)', eval, re.DOTALL)
+            if score_match and reason_match:
+                topic_score = int(score_match.group(2))
                 if 1 <= topic_score <= 10:
                     scores.append(topic_score)
-                    feedbacks.append(eval.strip())
+                    feedbacks.append(reason_match.group(1).strip())
                 else:
                     print(f"Invalid score (not between 1 and 10): {eval}")
             else:
-                print(f"Could not extract score: {eval}")
+                print(f"Could not extract score or reason: {eval}")
 
     except Exception as e:
         print(f"Unexpected error: {e}")
