@@ -48,7 +48,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # stop_words 정의
 stop_words = set(stopwords.words('english'))
 
-def load_data(file_path, sample_size=100):
+def load_data(file_path, sample_size=80):
     try:
         df = pd.read_csv(file_path, header=None, names=['text'])
     except FileNotFoundError:
@@ -163,61 +163,16 @@ def perform_vae_topic_modeling(data, num_topics, num_epochs=5, hidden_dim=50):
     return vae_model, topics
 
 def perform_bertopic_modeling(data):
-    try:
-        bertopic_model = BERTopic(language="english", calculate_probabilities=True)
-        topics, _ = bertopic_model.fit_transform(data)
-        
-        num_topics = len(bertopic_model.get_topics())  # 토픽 수 계산
-        topic_words = []
-        for i in range(num_topics):
-            topic = bertopic_model.get_topic(i)
-            if topic:  # 토픽이 존재하는 경우에만 처리
-                words = [word for word, _ in topic[:10]]  # 상위 10개 단어만 추출
-                topic_words.append(words)
-        
-        return bertopic_model, topic_words, num_topics
-    except AttributeError as e:
-        logging.error(f"BERTopic 모델링 중 오류 발생: {e}")
-        return None, None, None
-
-def perform_vae_topic_modeling(data, num_topics, num_epochs=5, hidden_dim=50):
-    try:
-        # 데이터 전처리
-        data = [str(doc) for doc in data if isinstance(doc, str) and len(doc) > 0]
-        vectorizer = TfidfVectorizer(max_df=0.95, min_df=2, stop_words='english')
-        doc_term_matrix = vectorizer.fit_transform(data)
-
-        # MinMaxScaler를 사용하여 0-1 사이로 정규화
-        scaler = MinMaxScaler()
-        normalized_matrix = scaler.fit_transform(doc_term_matrix.toarray())
-
-        # VAE 모델 초기화 및 학습
-        input_dim = doc_term_matrix.shape[1]
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        vae_model = VAE(input_dim=input_dim, hidden_dim=hidden_dim, latent_dim=num_topics).to(device)
-        optimizer = torch.optim.Adam(vae_model.parameters(), lr=1e-3)
-
-        batch_size = 64
-        data_loader = DataLoader(normalized_matrix.astype(np.float32), batch_size=batch_size, shuffle=True)
-
-        vae_model.train()
-        for epoch in range(num_epochs):
-            train_loss = 0
-            for batch in data_loader:
-                batch = batch.to(device)
-                optimizer.zero_grad()
-                recon_batch, mu, logvar = vae_model(batch)
-                loss = vae_loss(recon_batch, batch, mu, logvar)
-                loss.backward()
-                optimizer.step()
-                train_loss += loss.item()
-            logging.info(f"에폭 {epoch+1}/{num_epochs}, 손실: {train_loss / len(data_loader.dataset):.4f}")
-
-        topics = extract_vae_topics(vae_model, vectorizer, num_topics)
-        return vae_model, topics
-    except Exception as e:
-        logging.error(f"VAE 모델링 중 오류 발생: {e}")
-        return None, None
+    bertopic_model = BERTopic(language="english", calculate_probabilities=True)
+    topics, _ = bertopic_model.fit_transform(data)
+    
+    num_topics = len(bertopic_model.get_topics()) - 1  # -1은 아웃라이어 토픽을 제외하기 위함
+    topic_words = []
+    for i in range(num_topics):
+        words, _ = bertopic_model.get_topic(i)
+        topic_words.append([word for word, _ in words[:10]])  # 상위 10개 단어만 추출
+    
+    return bertopic_model, topic_words, num_topics
 
 def calculate_coherence(topics, tokenizer, bert_model):
     """
@@ -260,7 +215,7 @@ def calculate_coherence(topics, tokenizer, bert_model):
     final_coherence = np.mean(coherence_scores) if coherence_scores else 0
     return final_coherence
 
-def process_metrics(domain, model_type, topics, data, metrics_list, tokenizer, bert_model):
+def process_metrics(model_type, topics, data, metrics_list, tokenizer, bert_model):
     tokenized_data = [simple_preprocess(doc) for doc in data]
     dictionary = Dictionary(tokenized_data)
     corpus = [dictionary.doc2bow(text) for text in tokenized_data]
@@ -270,7 +225,6 @@ def process_metrics(domain, model_type, topics, data, metrics_list, tokenizer, b
     umass = calculate_umass(topics, corpus, dictionary)
 
     metrics_list.append({
-        'Domain': domain,
         'Model': model_type,
         'Coherence': coherence,
         'NPMI': npmi,
@@ -278,8 +232,6 @@ def process_metrics(domain, model_type, topics, data, metrics_list, tokenizer, b
     })
 
     logging.info(f"Coherence: {coherence:.4f}, NPMI: {npmi:.4f}, U_Mass: {umass:.4f}")
-    
-    return [metrics_list[-1]]  # 마지막에 추가된 메트릭을 리스트로 반환
 
 def calculate_npmi(topics, corpus, dictionary, top_n=10):
     # 토픽에서 사용된 모든 단어의 집합 생성
@@ -541,7 +493,7 @@ def call_openai_api(prompt: str, max_tokens: int = 3000) -> str:
 
     return full_response
 
-def llm_evaluation(topics, documents, model="gpt-4o-mini"):
+def llm_evaluation(topics, documents, model="gpt-4"):
     scores = []
     feedbacks = []
 
@@ -607,11 +559,9 @@ def run_llm_evaluation(metrics_df, datasets, sample_size=100, chunk_size=10):
         try:
             # 각 도메인에서 첫 번째 데이터셋만 사용
             data = next(iter(datasets[domain].values()))
-            
             if model_type == 'BERTopic':
-                model, topics, num_topics = perform_bertopic_modeling(data)
+                model, topics, _ = perform_bertopic_modeling(data)
             elif model_type == 'VAE':
-                # num_topics는 BERTopic에서 생성된 토픽 수를 사용
                 model, topics = perform_vae_topic_modeling(data, num_topics)
             else:
                 continue
@@ -742,6 +692,42 @@ def visualize_llm_results(llm_df):
     plt.savefig('llm_model_score.png')
     plt.close()
 
+def determine_optimal_topics(data, model_type, domain, dataset_name):
+    if model_type == 'VAE':
+        topic_numbers = range(5, 51, 5)  # 5부터 50까지 5 간격으로 토픽 수 설정
+        coherence_scores = []
+        
+        for num_topics in topic_numbers:
+            vae_model, topics = perform_vae_topic_modeling(data, latent_dim=num_topics)
+            
+            # coherence score 계산
+            dictionary = Dictionary(data)
+            corpus = [dictionary.doc2bow(text) for text in data]
+            cm = CoherenceModel(topics=topics, texts=data, dictionary=dictionary, coherence='c_v')
+            coherence_scores.append(cm.get_coherence())
+        
+        optimal_topics = topic_numbers[np.argmax(coherence_scores)]
+        
+    elif model_type == 'BERTopic':
+        train_data, test_data = train_test_split(data, test_size=0.2, random_state=42)
+        
+        best_score = -np.inf
+        best_params = {}
+        
+        for min_topic_size in [10, 20, 30, 40, 50]:
+            for n_gram_range in [(1, 1), (1, 2), (1, 3)]:
+                model = BERTopic(n_gram_range=n_gram_range, min_topic_size=min_topic_size)
+                topics, _ = model.fit_transform(train_data)
+                score = model.score(test_data)  # BERTopic의 내장 평가 메서드 사용
+                
+                if score > best_score:
+                    best_score = score
+                    best_params = {'min_topic_size': min_topic_size, 'n_gram_range': n_gram_range}
+        
+        optimal_topics = best_params
+    
+    print(f"Optimal topics for {model_type} - {domain} - {dataset_name}: {optimal_topics}")
+    return optimal_topics
 
 def evaluate_coherence_stability(models, domains, datasets, n_runs=5):
     stability_results = []
@@ -751,17 +737,16 @@ def evaluate_coherence_stability(models, domains, datasets, n_runs=5):
             coherence_values = []
 
             for _ in range(n_runs):
-                if model == 'BERTopic':
-                    # Run BERTopic to determine the number of topics
-                    _, topics, num_topics = perform_bertopic_modeling(data)
-                elif model == 'VAE':
-                    # Use the number of topics determined by BERTopic
+                # 모델 학습 및 Coherence 계산
+                if model == 'Model A':
+                    _, topics, _ = perform_bertopic_modeling(data)
+                elif model == 'Model B':
                     _, topics = perform_vae_topic_modeling(data, num_topics)
 
                 coherence = calculate_coherence(topics, tokenizer, bert_model)
                 coherence_values.append(coherence)
 
-            # Calculate coefficient of variation
+            # 변동계수 계산
             cv = np.std(coherence_values) / np.mean(coherence_values) if np.mean(coherence_values) != 0 else float('nan')
             stability_results.append({
                 'Model': model,
@@ -771,40 +756,55 @@ def evaluate_coherence_stability(models, domains, datasets, n_runs=5):
 
     return pd.DataFrame(stability_results)
 
-def main():
-    try:
-        datasets = load_all_datasets()
-        all_metrics = []
-        
-        for domain, domain_datasets in datasets.items():
-            for dataset_name, data in domain_datasets.items():
-                logging.info(f"Processing {domain} - {dataset_name}")
-                
-                bertopic_model, bertopic_topics, num_topics = perform_bertopic_modeling(data)
-                if bertopic_model is not None:
-                    metrics = process_metrics(domain, 'BERTopic', bertopic_topics, data, all_metrics, tokenizer, bert_model)
-                    if metrics:
-                        all_metrics.extend(metrics)
-                
-                vae_model, vae_topics = perform_vae_topic_modeling(data, num_topics)
-                if vae_model is not None:
-                    metrics = process_metrics(domain, 'VAE', vae_topics, data, all_metrics, tokenizer, bert_model)
-                    if metrics:
-                        all_metrics.extend(metrics)
-        
-        metrics_df = pd.DataFrame(all_metrics)
-        metrics_df.to_csv('topic_modeling_metrics.csv', index=False)
-        logging.info("Metrics saved to topic_modeling_metrics.csv")
-        
-        analyze_agreement(metrics_df)
-        stability_df = analyze_stability(datasets, ['BERTopic', 'VAE'])
-        visualize_topic_quality(metrics_df)
-        
-    except Exception as e:
-        logging.error(f"메인 함수 실행 중 예상치 못한 오류 발생: {e}")
+# Example usage
+models = ['Model A', 'Model B']
+domains = ['Domain 1', 'Domain 2', 'Domain 3']
+datasets = [dataset1, dataset2, dataset3]  # Replace with actual datasets
 
-if __name__ == "__main__":
-    main()
+stability_df = evaluate_coherence_stability(models, domains, datasets, n_runs=5)
+print(stability_df)
+
+def main():
+    datasets = load_all_datasets()
+    all_metrics = []
+    model_types = ['BERTopic', 'VAE']
+    
+    for domain, domain_datasets in datasets.items():
+        data = next(iter(domain_datasets.values()))
+        
+        bertopic_model, bertopic_topics, num_topics = perform_bertopic_modeling(data)  # Get num_topics
+        
+        for model_type in model_types:
+            if model_type == 'BERTopic':
+                metrics = process_metrics(domain, model_type, bertopic_topics, data, all_metrics, tokenizer, bert_model)
+                all_metrics.extend(metrics)
+            elif model_type == 'VAE':
+                vae_model, vae_topics = perform_vae_topic_modeling(data, num_topics)  # Use num_topics
+                metrics = process_metrics(domain, model_type, vae_topics, data, all_metrics, tokenizer, bert_model)
+                all_metrics.extend(metrics)
+    
+    metrics_df = pd.DataFrame(all_metrics)
+    metrics_df.to_csv('topic_modeling_metrics.csv', index=False)
+    logging.info("Metrics saved to topic_modeling_metrics.csv")
+
+    agreement_results = analyze_agreement(metrics_df)
+    stability_df = analyze_stability(datasets, model_types)
+    visualize_topic_quality(metrics_df)
+
+    llm_df = run_llm_evaluation(metrics_df, datasets)
+    
+    analyze_llm_results(llm_df)
+    llm_auto_metric_correlation(metrics_df, llm_df)
+    
+    sample_domain = list(datasets.keys())[0]
+    sample_data = next(iter(datasets[sample_domain].values()))
+    sample_model, sample_topics, _ = perform_bertopic_modeling(sample_data)
+    verify_llm_consistency(sample_topics, sample_data)
+    
+    analyze_llm_feedback(llm_df)
+    visualize_llm_results(llm_df)
+
+    print_results(metrics_df, agreement_results, stability_df)
 
 def print_results(metrics_df, agreement_results, stability_df):
     logging.info("\n=== 결과 분석 ===")
