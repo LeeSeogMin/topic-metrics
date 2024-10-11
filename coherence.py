@@ -48,6 +48,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # stop_words 정의
 stop_words = set(stopwords.words('english'))
 
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+bert_model = BertModel.from_pretrained('bert-base-uncased')
+
 def load_data(file_path, sample_size=100):
     try:
         df = pd.read_csv(file_path, header=None, names=['text'])
@@ -373,9 +376,6 @@ def calculate_umass(topics, corpus, dictionary, top_n=10):
             umass_scores.append(np.mean(pair_umass_scores))
 
     return np.mean(umass_scores) if umass_scores else float('nan')
-
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-bert_model = BertModel.from_pretrained('bert-base-uncased')
 
 # 일치도 분석 함수 (계속)
 def analyze_agreement(metrics_df):
@@ -771,42 +771,7 @@ def evaluate_coherence_stability(models, domains, datasets, n_runs=5):
 
     return pd.DataFrame(stability_results)
 
-def main():
-    try:
-        datasets = load_all_datasets()
-        all_metrics = []
-        
-        for domain, domain_datasets in datasets.items():
-            for dataset_name, data in domain_datasets.items():
-                logging.info(f"Processing {domain} - {dataset_name}")
-                
-                bertopic_model, bertopic_topics, num_topics = perform_bertopic_modeling(data)
-                if bertopic_model is not None:
-                    metrics = process_metrics(domain, 'BERTopic', bertopic_topics, data, all_metrics, tokenizer, bert_model)
-                    if metrics:
-                        all_metrics.extend(metrics)
-                
-                vae_model, vae_topics = perform_vae_topic_modeling(data, num_topics)
-                if vae_model is not None:
-                    metrics = process_metrics(domain, 'VAE', vae_topics, data, all_metrics, tokenizer, bert_model)
-                    if metrics:
-                        all_metrics.extend(metrics)
-        
-        metrics_df = pd.DataFrame(all_metrics)
-        metrics_df.to_csv('topic_modeling_metrics.csv', index=False)
-        logging.info("Metrics saved to topic_modeling_metrics.csv")
-        
-        analyze_agreement(metrics_df)
-        stability_df = analyze_stability(datasets, ['BERTopic', 'VAE'])
-        visualize_topic_quality(metrics_df)
-        
-    except Exception as e:
-        logging.error(f"메인 함수 실행 중 예상치 못한 오류 발생: {e}")
-
-if __name__ == "__main__":
-    main()
-
-def print_results(metrics_df, agreement_results, stability_df):
+def print_results(metrics_df, agreement_results, stability_df, stability_results):
     logging.info("\n=== 결과 분석 ===")
     
     logging.info("\n모델별 평균 성능:")
@@ -821,6 +786,9 @@ def print_results(metrics_df, agreement_results, stability_df):
 
     logging.info("\n안정성 분석 결과:")
     logging.info(stability_df.groupby(['Model', 'Metric'])['CV'].mean())
+    
+    logging.info("\n일관성 안정성 평가 결과:")
+    logging.info(stability_results)
 
     logging.info("\n최고 성능 모델:")
     best_models = metrics_df.loc[metrics_df.groupby(['Domain'])['Coherence'].idxmax()]
@@ -828,5 +796,74 @@ def print_results(metrics_df, agreement_results, stability_df):
 
     logging.info("\n분석 완료. 결과를 확인하고 해석하세요.")
 
-if __name__ == '__main__':
+def process_datasets(datasets):
+    all_metrics = []
+    bertopic_topics = {}
+    
+    for domain, domain_datasets in datasets.items():
+        for dataset_name, data in domain_datasets.items():
+            # BERTopic 모델링
+            bertopic_model, topics, num_topics = perform_bertopic_modeling(data)
+            bertopic_topics[f"{domain}_{dataset_name}"] = topics
+            
+            # BERTopic 메트릭 계산
+            bertopic_metrics = process_metrics(domain, 'BERTopic', topics, data, [], tokenizer, bert_model)
+            all_metrics.extend(bertopic_metrics)
+            
+            # VAE 모델링
+            vae_model, vae_topics = perform_vae_topic_modeling(data, num_topics)
+            
+            # VAE 메트릭 계산
+            vae_metrics = process_metrics(domain, 'VAE', vae_topics, data, [], tokenizer, bert_model)
+            all_metrics.extend(vae_metrics)
+    
+    return all_metrics, bertopic_topics
+
+def main():
+    try:
+        logging.info("데이터셋 로딩 시작")
+        datasets = load_all_datasets()
+        
+        logging.info("토픽 모델링 및 메트릭 계산 시작")
+        all_metrics, bertopic_topics = process_datasets(datasets)
+        
+        logging.info("메트릭 분석 시작")
+        metrics_df = pd.DataFrame(all_metrics)
+        metrics_df.to_csv('topic_modeling_metrics.csv', index=False)
+        
+        logging.info("일치도 분석 시작")
+        agreement_results = analyze_agreement(metrics_df)
+        
+        logging.info("안정성 분석 시작")
+        stability_df = analyze_stability(datasets, ['BERTopic', 'VAE'])
+        
+        logging.info("토픽 품질 시각화 시작")
+        visualize_topic_quality(metrics_df)
+        
+        logging.info("LLM 평가 시작")
+        llm_df = run_llm_evaluation(metrics_df, datasets)
+        analyze_llm_results(llm_df)
+        visualize_llm_results(llm_df)
+        
+        logging.info("LLM 평가와 자동 메트릭 상관관계 분석 시작")
+        llm_auto_metric_correlation(metrics_df, llm_df)
+        
+        logging.info("LLM 평가 일관성 검증 시작")
+        verify_llm_consistency(bertopic_topics, next(iter(datasets.values()))[0])
+        
+        logging.info("LLM 피드백 분석 시작")
+        analyze_llm_feedback(llm_df)
+        
+        logging.info("일관성 안정성 평가 시작")
+        stability_results = evaluate_coherence_stability(['BERTopic', 'VAE'], list(datasets.keys()), list(datasets.values()))
+        
+        logging.info("결과 출력 시작")
+        print_results(metrics_df, agreement_results, stability_df, stability_results)
+        
+        logging.info("모든 분석 완료")
+    except Exception as e:
+        logging.error(f"메인 함수 실행 중 예상치 못한 오류 발생: {e}")
+        raise
+
+if __name__ == "__main__":
     main()
